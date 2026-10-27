@@ -1,0 +1,471 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:ui' as ui;
+
+import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:matrix/matrix.dart';
+import 'package:path/path.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:workmanager/workmanager.dart';
+
+import 'background_wiper.dart';
+import 'core/config/env_config.dart';
+import 'core/theme/app_theme.dart';
+import 'core/utils/app_keys.dart';
+import 'data/services/connection_manager.dart';
+import 'data/services/disappearing_message_service.dart';
+import 'data/services/hidden_rooms_store.dart';
+import 'data/services/history_backfill_service.dart';
+import 'data/services/room_wipe_service.dart';
+import 'data/services/scheduled_message_service.dart';
+import 'data/settings/app_settings.dart';
+import 'features/home_gate.dart';
+import 'features/privacy/app_lock.dart';
+import 'providers/network_provider.dart';
+import 'data/services/voip_delegate.dart';
+import 'screens/auth/welcome_screen.dart';
+import 'screens/networks/network_connection_cache.dart';
+import 'core/services/notification_service.dart';
+import 'data/services/contacts_service.dart';
+
+import 'package:media_kit/media_kit.dart';
+
+@pragma("vm:entry-point")
+void overlayMain() {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(
+    const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Material(
+        color: Colors.transparent,
+        child: Center(
+          child: Text('Floating Bubble Placeholder', style: TextStyle(color: Colors.black)),
+        ),
+      ),
+    ),
+  );
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
+
+  // Filter out benign but spammy Matrix SDK bridge logs
+  final originalDebugPrint = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) {
+    if (message != null) {
+      if (message.contains('Invalid device @whatsappbot') || 
+          message.contains('Updating user device keys in database')) {
+        return;
+      }
+    }
+    originalDebugPrint(message, wrapWidth: wrapWidth);
+  };
+
+  // Crash-visibility in release builds: log instead of dying silently.
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    debugPrint('FlutterError: ${details.exceptionAsString()}');
+  };
+  ui.PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('Uncaught: $error\n$stack');
+    return true;
+  };
+
+  Workmanager().initialize(callbackDispatcher, isInDebugMode: kDebugMode);
+
+  // Independent init work runs concurrently — this is most of the startup
+  // time. The futures start immediately; we just await them in sequence.
+  final prefsFuture = SharedPreferences.getInstance();
+  final dirFuture = getApplicationSupportDirectory();
+  final supabaseFuture = Supabase.initialize(
+    url: EnvConfig.supabaseUrl,
+    anonKey: EnvConfig.supabaseAnonKey,
+  );
+  final hydrateFuture = NetworkConnectionCache.hydrate();
+  final hiddenFuture = HiddenRoomsStore.hydrate();
+
+  final prefs = await prefsFuture;
+  final Directory supportDir = await dirFuture;
+  await supabaseFuture;
+  await hydrateFuture;
+  await hiddenFuture;
+
+  final sqliteDb =
+      await openDatabase(join(supportDir.path, 'allora_matrix.db'));
+  final matrixDb =
+      await MatrixSdkDatabase.init('allora_matrix', database: sqliteDb);
+
+  final client = Client(
+    'AlloraClient', 
+    database: matrixDb,
+    syncFilter: Filter(
+      room: RoomFilter(
+        state: StateFilter(lazyLoadMembers: true),
+        timeline: StateFilter(limit: 30), // Fast initial preview and message sorting
+      ),
+    ),
+  );
+  try {
+    await client
+        .init(newHomeserver: Uri.parse(EnvConfig.matrixHomeserverUrl))
+        .timeout(const Duration(seconds: 8));
+  } catch (e) {
+    debugPrint('Matrix client init skipped/timed out: $e');
+  }
+  if (client.isLogged()) {
+    NotificationService.instance.init(client);
+    unawaited(client.sync());
+  }
+  unawaited(ContactsNotifier.instance.loadContacts());
+
+  final voip = VoIP(client, AlloraWebRTCDelegate());
+
+  runApp(
+    ProviderScope(
+      overrides: [
+        matrixClientProvider.overrideWithValue(client),
+        voipProvider.overrideWithValue(voip),
+        sharedPrefsProvider.overrideWithValue(prefs),
+      ],
+      child: AlloraApp(client: client),
+    ),
+  );
+}
+
+class AlloraApp extends ConsumerStatefulWidget {
+  final Client client;
+  const AlloraApp({super.key, required this.client});
+
+  @override
+  ConsumerState<AlloraApp> createState() => _AlloraAppState();
+}
+
+enum _StartupState { checking, unauthenticated, error, ready }
+
+class _AlloraAppState extends ConsumerState<AlloraApp> {
+  _StartupState _state = _StartupState.checking;
+  String? _errorMessage;
+  bool _servicesStarted = false;
+  StreamSubscription<AuthState>? _authSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+    _authSub = Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+      if (data.event == AuthChangeEvent.signedIn && _state != _StartupState.ready) {
+        _bootstrap();
+      } else if (data.event == AuthChangeEvent.signedOut) {
+        _finish(_StartupState.unauthenticated);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _authSub?.cancel();
+    super.dispose();
+  }
+
+  /// Ensure the Supabase session maps onto a Matrix session, registering the
+  /// Matrix account on first login. Mirrors the original flow, minus the
+  /// blocking UI states where nothing was actually blocking.
+  Future<void> _bootstrap() async {
+    debugPrint('🔄 _bootstrap() called, state=$_state');
+    final session = Supabase.instance.client.auth.currentSession;
+    debugPrint('📦 Session: ${session?.user.id}');
+    if (session == null) {
+      debugPrint('⚠️ No session — going unauthenticated');
+      _finish(_StartupState.unauthenticated);
+      return;
+    }
+    
+    Future.microtask(() {
+      ref.read(currentUserIdProvider.notifier).state = session.user.id;
+    });
+
+    if (widget.client.isLogged()) {
+      debugPrint('✅ Matrix already logged in — going ready');
+      unawaited(widget.client.sync());
+      _finish(_StartupState.ready);
+      return;
+    }
+
+    final chatUsername = session.user.id.replaceAll('-', '').toLowerCase();
+    final chatPassword = 'Allora_${chatUsername.substring(0, 15)}!';
+
+    try {
+      debugPrint('🔑 Logging into Matrix as $chatUsername');
+      await widget.client.login(
+        LoginType.mLoginPassword,
+        identifier: AuthenticationUserIdentifier(user: chatUsername),
+        password: chatPassword,
+      ).timeout(const Duration(seconds: 10));
+      debugPrint('✅ Matrix login success — going ready');
+      unawaited(widget.client.sync());
+      _finish(_StartupState.ready);
+    } on MatrixException catch (e) {
+      debugPrint('⚠️ Matrix login error: ${e.errcode} — $e');
+      if (e.errcode == 'M_FORBIDDEN' ||
+          e.errcode == 'M_USER_NOT_FOUND' ||
+          e.toString().toLowerCase().contains('not found')) {
+        await _registerAndLogin(chatUsername, chatPassword);
+      } else {
+        _errorMessage = 'Authentication failed. Please log in again.';
+        _finish(_StartupState.error);
+      }
+    } catch (e) {
+      debugPrint('⚠️ Matrix login failed/timed out: $e');
+      _errorMessage =
+          'We couldn\u2019t reach the Allora chat servers. Check your connection '
+          'and try again.';
+      _finish(_StartupState.error);
+    }
+  }
+
+  Future<void> _registerAndLogin(String username, String password) async {
+    // Preferred path: server-side provisioning (the Synapse registration
+    // secret stays on the server). See supabase/functions/allora-provision.
+    try {
+      final res = await Supabase.instance.client.functions
+          .invoke('allora-provision', body: {'password': password})
+          .timeout(const Duration(seconds: 12));
+      final data = res.data;
+      if (data is Map && data['ok'] == true) {
+        await widget.client.login(
+          LoginType.mLoginPassword,
+          identifier: AuthenticationUserIdentifier(user: username),
+          password: password,
+        ).timeout(const Duration(seconds: 10));
+        _finish(_StartupState.ready);
+        return;
+      }
+    } catch (e) {
+      debugPrint('Provision function unavailable, using legacy path: $e');
+    }
+
+    // LEGACY FALLBACK — remove once allora-provision is deployed and the
+    // old registration secret has been rotated on the homeserver. Shipping
+    // this secret in the app is the pre-v2 behaviour kept only so existing
+    // installs keep working during the migration.
+    try {
+      const baseUrl = EnvConfig.matrixHomeserverUrl;
+      const secret = EnvConfig.synapseAdminSecret;
+
+      final nonceRes = await http
+          .get(Uri.parse('$baseUrl/_synapse/admin/v1/register'))
+          .timeout(const Duration(seconds: 8));
+      if (nonceRes.statusCode != 200) {
+        throw Exception('Backend sync failed');
+      }
+      final nonce = jsonDecode(nonceRes.body)['nonce'];
+      final macStr = '$nonce\x00$username\x00$password\x00notadmin';
+      final mac =
+          Hmac(sha1, utf8.encode(secret)).convert(utf8.encode(macStr));
+
+      final regRes = await http
+          .post(
+            Uri.parse('$baseUrl/_synapse/admin/v1/register'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'nonce': nonce,
+              'username': username,
+              'password': password,
+              'mac': mac.toString(),
+              'admin': false,
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (regRes.statusCode < 200 || regRes.statusCode >= 300) {
+        final body = jsonDecode(regRes.body);
+        if (body['errcode'] != 'M_USER_IN_USE') {
+          throw Exception('Account creation rejected: ${regRes.statusCode} - ${regRes.body}');
+        }
+      }
+
+      await widget.client.login(
+        LoginType.mLoginPassword,
+        identifier: AuthenticationUserIdentifier(user: username),
+        password: password,
+      ).timeout(const Duration(seconds: 10));
+      _finish(_StartupState.ready);
+    } catch (e) {
+      debugPrint('Allora backend error: $e');
+      _errorMessage =
+          'We couldn\u2019t connect you to the Allora chat servers. Please '
+          'check your internet connection and try again.';
+      _finish(_StartupState.error);
+    }
+  }
+
+  void _finish(_StartupState state) {
+    if (!mounted) return;
+    setState(() => _state = state);
+    if (state == _StartupState.ready) _startServices();
+  }
+
+  /// Long-lived services; started once per authenticated run.
+  void _startServices() {
+    if (_servicesStarted) return;
+    _servicesStarted = true;
+    final client = widget.client;
+    // Finish any wipe interrupted by a kill, resume scheduled sends, start
+    // the disappearing-message sweeper.
+    RoomWipeService.resume(client);
+    ScheduledMessageService.resume(client);
+    DisappearingMessageService.start(
+        client, ref.read(settingsProvider.notifier));
+    HistoryBackfillService.start(client);
+    // Cross-platform native notification service (Allora • WhatsApp / Telegram with direct reply)
+    NotificationService.instance.init(client);
+    // Instantiate the connection manager so state flows from first frame.
+    ref.read(connectionManagerProvider);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(settingsProvider);
+
+    return MaterialApp(
+      title: 'Allora',
+      scaffoldMessengerKey: rootScaffoldMessengerKey,
+      debugShowCheckedModeBanner: false,
+      themeMode: settings.themeMode,
+      theme: AppTheme.light(
+          accentIndex: settings.accentIndex,
+          highContrast: settings.highContrast,
+          reduceMotion: settings.reduceMotion),
+      darkTheme: AppTheme.dark(
+          accentIndex: settings.accentIndex,
+          darkThemeStyle: settings.darkThemeStyle,
+          highContrast: settings.highContrast,
+          reduceMotion: settings.reduceMotion),
+      home: _home(),
+    );
+  }
+
+  Widget _home() {
+    switch (_state) {
+      case _StartupState.checking:
+        return const _SplashScreen();
+      case _StartupState.unauthenticated:
+        return WelcomeScreen(client: widget.client);
+      case _StartupState.error:
+        return _ErrorScreen(
+          message: _errorMessage ?? 'Something went wrong.',
+          onRetry: () {
+            setState(() => _state = _StartupState.checking);
+            _bootstrap();
+          },
+          onSignOut: () async {
+            await Supabase.instance.client.auth.signOut();
+            if (mounted) setState(() => _state = _StartupState.unauthenticated);
+          },
+        );
+      case _StartupState.ready:
+        return const LockGate(child: HomeGate());
+    }
+  }
+}
+
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.allora;
+    return Scaffold(
+      backgroundColor: c.canvas,
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ClipOval(
+              child: Image.asset(
+                'assets/images/app_icon.png',
+                width: 84,
+                height: 84,
+                fit: BoxFit.cover,
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'Allora',
+              style: TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.5,
+                color: c.text,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorScreen extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+  final VoidCallback onSignOut;
+
+  const _ErrorScreen({
+    required this.message,
+    required this.onRetry,
+    required this.onSignOut,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.allora;
+    return Scaffold(
+      backgroundColor: c.canvas,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Icon(Icons.cloud_off_rounded, color: c.accent, size: 64),
+              const SizedBox(height: 24),
+              Text('Connection error',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: c.text)),
+              const SizedBox(height: 12),
+              Text(message,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      fontSize: 14.5, color: c.textSecondary, height: 1.5)),
+              const SizedBox(height: 36),
+              FilledButton(
+                onPressed: onRetry,
+                child: const Text('Retry connection'),
+              ),
+              const SizedBox(height: 10),
+              TextButton(
+                onPressed: onSignOut,
+                child: Text('Return to welcome screen',
+                    style: TextStyle(color: c.textSecondary)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
