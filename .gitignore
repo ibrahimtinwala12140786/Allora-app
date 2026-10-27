@@ -30,6 +30,18 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+build/
+/android/build/
+.gradle/
+android/.gradle/
+
+# Supabase CLI temporary files
+supabase/.temp/
+.temp/
+
+# Analysis and test output dumps
+*_output.txt
+*.output
 
 # Symbolication related
 app.*.symbols
@@ -52,5 +64,7 @@ app.*.map.json
 secrets/
 
 # Local test & scratch scripts containing temporary keys or overrides
-test_gemini.dart
-scratch_*.dart
+replace.dart
+scratch*.dart
+test_*.dart
+flutter_*.png
