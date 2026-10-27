@@ -5,6 +5,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:matrix/matrix.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../services/contact_name_resolver.dart';
+
 final contactsProvider =
     StateNotifierProvider<ContactsNotifier, Map<String, String>>((ref) {
   return (ContactsNotifier.instance)..loadContacts();
@@ -33,7 +35,14 @@ class ContactsNotifier extends StateNotifier<Map<String, String>> {
     try {
       // 1. Instant native Android contacts query via Android ContactsContract
       try {
-        const platformChannel = MethodChannel('app.allorachat.messenger/notifications');
+        await ContactNameResolver.instance.syncContacts(forceRefresh: force);
+        if (ContactNameResolver.instance.phoneToName.isNotEmpty) {
+          map.addAll(ContactNameResolver.instance.phoneToName);
+          state = Map<String, String>.from(map);
+          _contactCount = map.length;
+        }
+
+        const platformChannel = MethodChannel('app.allorachat.messenger/contacts');
         final nativeMap = await platformChannel.invokeMapMethod<String, String>('getDeviceContacts');
         if (nativeMap != null && nativeMap.isNotEmpty) {
           map.addAll(nativeMap);
@@ -266,7 +275,17 @@ class ContactsNotifier extends StateNotifier<Map<String, String>> {
     // 2. Extract best phone number digits
     final phoneDigits = _extractBestPhoneDigits(room, remoteMxid: remoteMxid);
 
-    // Priority 1: Check device contacts
+    // Priority 1: Check device contacts (in-memory resolver + state)
+    final inMemoryMatch = ContactNameResolver.instance.resolveDisplayName(
+      fallbackName: '',
+      matrixUserId: remoteMxid,
+      roomMemberIds: room.getParticipants().map((p) => p.id).toList(),
+      rawPhoneNumber: phoneDigits.isNotEmpty ? phoneDigits : null,
+    );
+    if (inMemoryMatch.isNotEmpty) {
+      return inMemoryMatch;
+    }
+
     if (state.isNotEmpty) {
       if (phoneDigits.isNotEmpty) {
         final match = _matchNumberInState(phoneDigits);

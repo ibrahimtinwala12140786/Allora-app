@@ -5,6 +5,7 @@ import '../../../core/theme/app_theme.dart';
 import '../../../core/utils/chat_time.dart';
 import '../../../core/widgets/allora_avatar.dart';
 import '../../../data/services/contacts_service.dart';
+import '../../../services/contact_name_resolver.dart';
 import '../chat_list_providers.dart';
 
 /// One conversation row matching the executive modern Allora design.
@@ -42,6 +43,12 @@ class ChatTile extends ConsumerWidget {
     );
     final hasStamp = entry.lastEvent != null;
 
+    final resolvedTitle = ContactNameResolver.instance.resolveDisplayName(
+      fallbackName: entry.title,
+      matrixUserId: room.directChatMatrixID,
+      roomMemberIds: room.getParticipants().map((p) => p.id).toList(),
+    );
+
     final titleColor = isDark ? const Color(0xFFF8FAFC) : const Color(0xFF0F172A);
     final subtitleColor = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
     final timeColor = isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8);
@@ -62,7 +69,7 @@ class ChatTile extends ConsumerWidget {
                 children: [
                   // Avatar with platform badge
                   AlloraAvatar(
-                    name: entry.title,
+                    name: resolvedTitle,
                     mxcUri: AlloraAvatar.resolveUri(room),
                     client: room.client,
                     size: 50,
@@ -92,7 +99,7 @@ class ChatTile extends ConsumerWidget {
                             ],
                             Expanded(
                               child: Text(
-                                entry.title,
+                                resolvedTitle,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: TextStyle(

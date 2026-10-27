@@ -1,26 +1,38 @@
 package app.allorachat.messenger
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.provider.ContactsContract
 import android.provider.Settings
 import android.view.WindowManager
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.util.concurrent.Executors
 
 /**
  * FlutterFragmentActivity (not FlutterActivity) is required by local_auth
  * for the BiometricPrompt API.
  *
- * Two method channels:
- *  - "…/secure"  toggles FLAG_SECURE (screenshot/recent-apps protection).
- *  - "…/bubble"  drives the floating chat overlay ([BubbleService]).
+ * Method channels:
+ *  - "…/secure"    toggles FLAG_SECURE (screenshot/recent-apps protection).
+ *  - "…/bubble"    drives the floating chat overlay ([BubbleService]).
+ *  - "…/contacts"  fast native contacts query and permission handler.
  */
 class MainActivity : FlutterFragmentActivity() {
     private val secureChannel = "app.allorachat.messenger/secure"
     private val bubbleChannel = "app.allorachat.messenger/bubble"
     private val notificationsChannel = "app.allorachat.messenger/notifications"
+    private val CONTACTS_CHANNEL = "app.allorachat.messenger/contacts"
+    private val CONTACTS_PERMISSION_REQ = 1001
+    private var pendingContactsResult: MethodChannel.Result? = null
+    private val bgExecutor = Executors.newSingleThreadExecutor()
 
     companion object {
         var notificationChannelRef: MethodChannel? = null
@@ -38,6 +50,53 @@ class MainActivity : FlutterFragmentActivity() {
                 "onNotificationLike",
                 mapOf("roomId" to roomId, "eventId" to eventId)
             )
+        }
+
+        // Reusable by NotificationHelper.kt and BubbleService.kt
+        fun loadPhoneContactsMap(context: Context): Map<String, String> {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                return emptyMap()
+            }
+
+            val map = HashMap<String, String>()
+            val projection = arrayOf(
+                ContactsContract.CommonDataKinds.Phone.NUMBER,
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+            )
+
+            try {
+                context.contentResolver.query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    projection,
+                    null,
+                    null,
+                    null
+                )?.use { cursor ->
+                    val numberIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.NUMBER)
+                    val nameIdx = cursor.getColumnIndex(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+
+                    while (cursor.moveToNext()) {
+                        val rawNumber = cursor.getString(numberIdx) ?: continue
+                        val name = cursor.getString(nameIdx)?.trim() ?: continue
+                        if (name.isEmpty()) continue
+
+                        // Strip everything except digits (e.g. "+91 98765-43210" -> "919876543210")
+                        val digits = rawNumber.replace(Regex("[^0-9]"), "")
+                        if (digits.length >= 7) {
+                            map[digits] = name
+                            // Also index by last 10 digits so local numbers without country code match Matrix IDs
+                            if (digits.length > 10) {
+                                map[digits.takeLast(10)] = name
+                            } else if (digits.length == 11 && digits.startsWith("0")) {
+                                map[digits.substring(1)] = name
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+            return map
         }
     }
 
@@ -138,6 +197,27 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CONTACTS_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "getDeviceContacts" -> {
+                        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS)
+                            == PackageManager.PERMISSION_GRANTED
+                        ) {
+                            fetchContactsAsync(result)
+                        } else {
+                            pendingContactsResult = result
+                            ActivityCompat.requestPermissions(
+                                this,
+                                arrayOf(Manifest.permission.READ_CONTACTS),
+                                CONTACTS_PERMISSION_REQ
+                            )
+                        }
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
         val notifChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, notificationsChannel)
         notificationChannelRef = notifChannel
         notifChannel.setMethodCallHandler { call, result ->
@@ -181,7 +261,7 @@ class MainActivity : FlutterFragmentActivity() {
                     result.success(true)
                 }
                 "getDeviceContacts" -> {
-                    result.success(getDeviceContactsMap())
+                    fetchContactsAsync(result)
                 }
                 "cancelNotification" -> {
                     val id = call.argument<Int>("id") ?: 0
@@ -201,40 +281,30 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
 
-    private fun getDeviceContactsMap(): Map<String, String> {
-        val map = mutableMapOf<String, String>()
-        if (checkSelfPermission(android.Manifest.permission.READ_CONTACTS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            return map
-        }
-        val uri = android.provider.ContactsContract.CommonDataKinds.Phone.CONTENT_URI
-        val projection = arrayOf(
-            android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER,
-            android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
-        )
-        try {
-            contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
-                val numberIdx = cursor.getColumnIndex(android.provider.ContactsContract.CommonDataKinds.Phone.NUMBER)
-                val nameIdx = cursor.getColumnIndex(android.provider.ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
-                if (numberIdx != -1 && nameIdx != -1) {
-                    while (cursor.moveToNext()) {
-                        val number = cursor.getString(numberIdx) ?: continue
-                        val name = cursor.getString(nameIdx) ?: continue
-                        val digits = number.replace(Regex("[^0-9]"), "")
-                        if (digits.length >= 7) {
-                            map[digits] = name
-                            if (digits.length >= 10) {
-                                map[digits.takeLast(10)] = name
-                            }
-                            map.putIfAbsent(digits.takeLast(7), name)
-                            if (digits.startsWith("0") && digits.length > 7) {
-                                map[digits.drop(1)] = name
-                            }
-                        }
-                    }
-                }
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == CONTACTS_PERMISSION_REQ) {
+            val result = pendingContactsResult
+            pendingContactsResult = null
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                if (result != null) fetchContactsAsync(result)
+            } else {
+                result?.success(emptyMap<String, String>())
             }
-        } catch (_: Exception) {}
-        return map
+        }
+    }
+
+    private fun fetchContactsAsync(result: MethodChannel.Result) {
+        bgExecutor.execute {
+            val contactsMap = loadPhoneContactsMap(applicationContext)
+            runOnUiThread {
+                result.success(contactsMap)
+            }
+        }
     }
 
     private fun canDrawOverlays(): Boolean {

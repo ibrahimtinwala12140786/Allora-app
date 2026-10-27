@@ -1,5 +1,6 @@
 import 'package:allora/data/services/contacts_service.dart';
 import 'package:allora/features/chat_list/chat_list_providers.dart';
+import 'package:allora/services/contact_name_resolver.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -96,6 +97,59 @@ void main() {
         'Sarah Connor',
       );
       expect(human, 'Sarah Connor');
+    });
+  });
+
+  group('ContactNameResolver', () {
+    setUp(() {
+      ContactNameResolver.instance.setContactsForTesting({
+        '919876543210': 'Ibrahim Tinwala',
+        '9876543210': 'Ibrahim Tinwala',
+        '14155550123': 'Alice Developer',
+        '4155550123': 'Alice Developer',
+      });
+    });
+
+    test('resolves phonebook name from WhatsApp Matrix puppet ID', () {
+      final name = ContactNameResolver.instance.resolveDisplayName(
+        fallbackName: 'Push Name',
+        matrixUserId: '@whatsapp_919876543210:matrix.allorachat.app',
+      );
+      expect(name, 'Ibrahim Tinwala');
+    });
+
+    test('resolves phonebook name from local 10 digit contact match', () {
+      final name = ContactNameResolver.instance.resolveDisplayName(
+        fallbackName: 'Push Name',
+        matrixUserId: '@whatsapp_919876543210:matrix.allorachat.app',
+      );
+      expect(name, 'Ibrahim Tinwala');
+    });
+
+    test('resolves phonebook name from room member IDs', () {
+      final name = ContactNameResolver.instance.resolveDisplayName(
+        fallbackName: 'Some Push Name',
+        roomMemberIds: [
+          '@alice:matrix.allorachat.app',
+          '@whatsapp_14155550123:matrix.allorachat.app',
+        ],
+      );
+      expect(name, 'Alice Developer');
+    });
+
+    test('resolves phonebook name from phone number in fallback text', () {
+      final name = ContactNameResolver.instance.resolveDisplayName(
+        fallbackName: '+91 98765 43210',
+      );
+      expect(name, 'Ibrahim Tinwala');
+    });
+
+    test('falls back to fallbackName if number is not saved in address book', () {
+      final name = ContactNameResolver.instance.resolveDisplayName(
+        fallbackName: 'Unknown Person',
+        matrixUserId: '@whatsapp_999999999999:matrix.allorachat.app',
+      );
+      expect(name, 'Unknown Person');
     });
   });
 }

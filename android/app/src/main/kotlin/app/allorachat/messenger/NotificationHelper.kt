@@ -184,11 +184,18 @@ object NotificationHelper {
             avatarPath, imagePath, imagePaths, audioPath, isSensitive, otpCode
         )
 
-        // Priority 1: Check device contacts by rawSenderId, sender, or roomId
-        val deviceContactName = resolveDeviceContactName(context, rawSenderId)
+        // Inside NotificationHelper.kt before setting the notification title/sender:
+        val contactsMap = MainActivity.loadPhoneContactsMap(context)
+        val senderIdOrPhone = if (rawSenderId.isNotBlank()) rawSenderId else (if (sender.isNotBlank()) sender else roomId)
+        val digits = senderIdOrPhone.replace(Regex("[^0-9]"), "")
+        val savedContactName = contactsMap[digits]
+            ?: (if (digits.length > 10) contactsMap[digits.takeLast(10)] else null)
+            ?: (if (digits.length == 11 && digits.startsWith("0")) contactsMap[digits.substring(1)] else null)
+            ?: resolveDeviceContactName(context, rawSenderId)
             ?: resolveDeviceContactName(context, sender)
             ?: resolveDeviceContactName(context, roomId)
-        val finalSender = if (!deviceContactName.isNullOrBlank()) deviceContactName else sender
+            ?: sender // Fallback if number is not saved in phone
+        val finalSender = if (savedContactName.isNotBlank()) savedContactName else sender
 
         // Tap notification -> open MainActivity
         val tapIntent = Intent(context, MainActivity::class.java).apply {
@@ -693,10 +700,19 @@ object NotificationHelper {
 
     fun resolveDeviceContactName(context: Context, input: String): String? {
         if (input.isBlank()) return null
+        val digits = input.replace(Regex("[^0-9]"), "")
+        if (digits.length >= 7) {
+            val contactsMap = MainActivity.loadPhoneContactsMap(context)
+            val matched = contactsMap[digits]
+                ?: (if (digits.length > 10) contactsMap[digits.takeLast(10)] else null)
+                ?: (if (digits.length == 11 && digits.startsWith("0")) contactsMap[digits.substring(1)] else null)
+            if (!matched.isNullOrBlank()) {
+                return matched
+            }
+        }
         if (context.checkSelfPermission(android.Manifest.permission.READ_CONTACTS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             return null
         }
-        val digits = input.replace(Regex("[^0-9]"), "")
         if (digits.length < 7) return null
 
         val candidates = mutableListOf<String>()

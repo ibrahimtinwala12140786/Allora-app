@@ -24,6 +24,7 @@ import '../bridge/models/bridge_connection_state.dart';
 import '../bridge/providers/bridge_health_provider.dart';
 import '../bridge/widgets/bridge_status_banner.dart';
 import '../../data/services/contacts_service.dart';
+import '../../services/contact_name_resolver.dart';
 
 import '../ai/ai_assistant_sheet.dart';
 import '../chat_list/chat_list_providers.dart';
@@ -90,6 +91,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    ContactNameResolver.instance.addListener(_onContactsUpdated);
     NotificationService.instance.setActiveRoom(room.id);
     _unreadAtOpen = room.notificationCount;
     _scroll.addListener(_onScroll);
@@ -114,8 +116,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     });
   }
 
+  void _onContactsUpdated() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    ContactNameResolver.instance.removeListener(_onContactsUpdated);
     NotificationService.instance.setActiveRoom(null);
     _syncSub?.cancel();
     _roomSub?.cancel();
@@ -288,10 +295,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             !event.senderId.split(':').first.toLowerCase().endsWith('bot') &&
             !event.senderId.split(':').first.toLowerCase().contains('bridge'));
     if (isMe) return 'You';
-    return ref.read(contactsProvider.notifier).resolveContactHierarchy(
+    final fallback = ref.read(contactsProvider.notifier).resolveContactHierarchy(
       room: widget.room,
       event: event,
       senderId: event.senderId,
+    );
+    return ContactNameResolver.instance.resolveDisplayName(
+      fallbackName: fallback,
+      matrixUserId: event.senderId,
     );
   }
 
@@ -832,6 +843,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final isDirect = BridgeRoomClassifier.isDirectChat(room, client: room.client);
     final contacts = ref.watch(contactsProvider.notifier);
     final title = contacts.resolveContactHierarchy(room: room);
+    final displayTitle = ContactNameResolver.instance.resolveDisplayName(
+      fallbackName: title,
+      matrixUserId: room.directChatMatrixID,
+      roomMemberIds: room.getParticipants().map((p) => p.id).toList(),
+    );
 
     final networkId =
         BridgeRoomClassifier.getNetworkForRoom(room, client: room.client);
@@ -870,7 +886,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             Hero(
               tag: 'avatar_${room.id}',
               child: AlloraAvatar(
-                name: title,
+                name: displayTitle,
                 mxcUri: AlloraAvatar.resolveUri(room),
                 client: room.client,
                 size: 38,
@@ -886,7 +902,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                     children: [
                       Flexible(
                         child: Text(
-                          title,
+                          displayTitle,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(

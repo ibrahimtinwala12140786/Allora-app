@@ -27,6 +27,7 @@ import '../search/global_search_screen.dart';
 import '../settings/settings_screen.dart';
 import 'archived_chats_screen.dart';
 import 'chat_list_providers.dart';
+import '../../services/contact_name_resolver.dart';
 import 'widgets/chat_tile.dart';
 import 'widgets/platform_sidebar_drawer.dart';
 
@@ -46,12 +47,19 @@ class _ChatListScreenState extends ConsumerState<ChatListScreen> {
   @override
   void initState() {
     super.initState();
+    ContactNameResolver.instance.addListener(_onContactsUpdated);
+    ContactNameResolver.instance.syncContacts();
     Future.microtask(
         () => ref.read(connectionManagerProvider.notifier).probeNetworks());
   }
 
+  void _onContactsUpdated() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
+    ContactNameResolver.instance.removeListener(_onContactsUpdated);
     _searchController.dispose();
     _searchFocus.dispose();
     super.dispose();

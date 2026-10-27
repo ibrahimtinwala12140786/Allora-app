@@ -35,6 +35,7 @@ import 'screens/auth/welcome_screen.dart';
 import 'screens/networks/network_connection_cache.dart';
 import 'core/services/notification_service.dart';
 import 'data/services/contacts_service.dart';
+import 'services/contact_name_resolver.dart';
 
 import 'package:media_kit/media_kit.dart';
 
@@ -126,6 +127,7 @@ Future<void> main() async {
     unawaited(client.sync());
   }
   unawaited(ContactsNotifier.instance.loadContacts());
+  unawaited(ContactNameResolver.instance.syncContacts());
 
   final voip = VoIP(client, AlloraWebRTCDelegate());
 
