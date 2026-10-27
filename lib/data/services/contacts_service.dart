@@ -102,119 +102,348 @@ class ContactsNotifier extends StateNotifier<Map<String, String>> {
     await loadContacts(force: true);
   }
 
-  /// Resolves contact name strictly following the 3-step hierarchy:
+  static bool isBotMxid(String mxid) {
+    if (mxid.isEmpty) return false;
+    final lower = mxid.toLowerCase().trim();
+    final localpart = lower.startsWith('@') ? lower.substring(1).split(':').first : lower;
+    return localpart.endsWith('bot') ||
+        localpart.contains('bridge') ||
+        localpart == 'whatsappbot' ||
+        localpart == 'telegrambot' ||
+        localpart == 'instagrambot' ||
+        localpart == 'messengerbot' ||
+        localpart == 'facebookbot' ||
+        localpart == 'discordbot' ||
+        localpart == 'slackbot' ||
+        localpart == 'twitterbot' ||
+        localpart == 'xbot' ||
+        localpart == 'signalbot' ||
+        localpart == 'allora' ||
+        localpart == 'allorabot';
+  }
+
+  static bool isBotDisplayName(String name) {
+    if (name.isEmpty) return false;
+    final lower = name.toLowerCase().trim();
+    return lower == 'whatsapp bridge bot' ||
+        lower == 'whatsapp bridge' ||
+        lower == 'telegram bridge bot' ||
+        lower == 'telegram bridge' ||
+        lower == 'facebook messenger bridge' ||
+        lower == 'messenger bridge bot' ||
+        lower == 'messenger bridge' ||
+        lower == 'facebook bridge bot' ||
+        lower == 'facebook bridge' ||
+        lower == 'instagram bridge bot' ||
+        lower == 'instagram bridge' ||
+        lower == 'discord bridge bot' ||
+        lower == 'discord bridge' ||
+        lower == 'slack bridge bot' ||
+        lower == 'slack bridge' ||
+        lower == 'signal bridge bot' ||
+        lower == 'signal bridge' ||
+        lower == 'twitter bridge bot' ||
+        lower == 'x bridge' ||
+        lower == 'bridge bot' ||
+        lower == 'bridgebot' ||
+        lower.contains('bridge bot') ||
+        lower.contains('bridgebot') ||
+        lower.contains('whatsapp bot') ||
+        lower.contains('telegram bot') ||
+        lower.contains('messenger bot') ||
+        lower.contains('facebook bot') ||
+        lower.contains('instagram bot') ||
+        lower == 'whatsapp' ||
+        lower == 'telegram' ||
+        lower == 'allora' ||
+        lower == 'empty room' ||
+        lower == 'empty chat';
+  }
+
+  static bool isRemotePuppetMxid(String mxid) {
+    final lower = mxid.toLowerCase();
+    return lower.contains('_whatsapp_') || lower.contains('@whatsapp_') ||
+           lower.contains('_telegram_') || lower.contains('@telegram_') ||
+           lower.contains('_facebook_') || lower.contains('@facebook_') ||
+           lower.contains('_messenger_') || lower.contains('@messenger_') ||
+           lower.contains('_instagram_') || lower.contains('@instagram_') ||
+           lower.contains('_discord_') || lower.contains('@discord_') ||
+           lower.contains('_slack_') || lower.contains('@slack_') ||
+           lower.contains('_twitter_') || lower.contains('@twitter_') ||
+           lower.contains('_signal_') || lower.contains('@signal_') ||
+           lower.contains('@tg_') || lower.contains('_tg_') ||
+           lower.contains('@wa_') || lower.contains('_wa_') ||
+           lower.contains('@fb_') || lower.contains('_fb_') ||
+           lower.contains('@ig_') || lower.contains('_ig_');
+  }
+
+  /// Formats raw digits into a clean, readable international phone number.
+  static String formatPhoneNumber(String original, String digitsOnly) {
+    if (original.contains(' ') || original.contains('-')) {
+      return original.startsWith('+') ? original : '+$original';
+    }
+
+    if (digitsOnly.startsWith('91') && digitsOnly.length == 12) {
+      return '+91 ${digitsOnly.substring(2, 7)} ${digitsOnly.substring(7)}';
+    } else if (digitsOnly.startsWith('1') && digitsOnly.length == 11) {
+      return '+1 (${digitsOnly.substring(1, 4)}) ${digitsOnly.substring(4, 7)}-${digitsOnly.substring(7)}';
+    } else if (digitsOnly.startsWith('44') && digitsOnly.length >= 11 && digitsOnly.length <= 12) {
+      return '+44 ${digitsOnly.substring(2, 6)} ${digitsOnly.substring(6)}';
+    } else if (digitsOnly.startsWith('92') && digitsOnly.length == 12) {
+      return '+92 ${digitsOnly.substring(2, 5)} ${digitsOnly.substring(5)}';
+    } else if (digitsOnly.startsWith('971') && digitsOnly.length >= 11 && digitsOnly.length <= 12) {
+      return '+971 ${digitsOnly.substring(3, 5)} ${digitsOnly.substring(5, 8)} ${digitsOnly.substring(8)}';
+    } else if (digitsOnly.length == 10) {
+      return '+${digitsOnly.substring(0, 5)} ${digitsOnly.substring(5)}';
+    }
+
+    return '+$digitsOnly';
+  }
+
+  /// Resolves contact name strictly following the hierarchy:
   ///   Priority 1: Device Contact Name (matches phone number in device/SIM address book)
-  ///   Priority 2: Social Contact Name (saved name from that social network, e.g. WhatsApp contact)
-  ///   Priority 3: Social Platform Public Profile / Push Name (name they gave themselves)
-  ///   Priority 4: Formatted phone number or cleaned handle
+  ///   Priority 2: Social Contact Profile Name (saved name or push name, if not a bridge bot or generic name)
+  ///   Priority 3: Formatted International Phone Number (e.g. +91 98765 43210 for WhatsApp, Signal, etc.)
+  ///   Priority 4: Clean Platform Handle / Username (e.g. for Telegram, Instagram, Messenger, Discord)
+  ///   Priority 5: Clean Platform Fallback (e.g. "WhatsApp Contact", never "WhatsApp bridge bot")
   String resolveContactHierarchy({
     required Room room,
     Event? event,
     String? senderId,
   }) {
-    final sId = senderId ??
-        event?.senderId ??
-        (room.summary.mHeroes?.isNotEmpty == true ? room.summary.mHeroes!.first : '');
-    final rawRoomName = _cleanFallback(room.getLocalizedDisplayname());
-
     if (state.isEmpty && !_isLoading) {
       loadContacts();
     }
 
-    // Priority 1: Check device contacts by senderId, heroes, or room name digits
+    final myId = room.client.userID?.toLowerCase() ?? '';
+
+    // 1. Identify the remote contact's Matrix ID (puppet or non-bot participant)
+    String? remoteMxid;
+    if (senderId != null && senderId.isNotEmpty && senderId.toLowerCase() != myId && !isBotMxid(senderId)) {
+      remoteMxid = senderId;
+    }
+    if (remoteMxid == null && event?.senderId != null) {
+      final eSender = event!.senderId;
+      if (eSender.toLowerCase() != myId && !isBotMxid(eSender)) {
+        remoteMxid = eSender;
+      }
+    }
+    if (remoteMxid == null) {
+      final directId = room.directChatMatrixID;
+      if (directId != null && directId.toLowerCase() != myId && !isBotMxid(directId)) {
+        remoteMxid = directId;
+      }
+    }
+    if (remoteMxid == null) {
+      for (final p in room.getParticipants()) {
+        final pId = p.id;
+        final pLower = pId.toLowerCase();
+        if (pLower == myId || isBotMxid(pLower)) continue;
+        if (isRemotePuppetMxid(pLower)) {
+          remoteMxid = pId;
+          break;
+        }
+      }
+    }
+    if (remoteMxid == null && room.summary.mHeroes != null) {
+      for (final h in room.summary.mHeroes!) {
+        final hLower = h.toLowerCase();
+        if (hLower == myId || isBotMxid(hLower)) continue;
+        remoteMxid = h;
+        break;
+      }
+    }
+    if (remoteMxid == null) {
+      for (final p in room.getParticipants()) {
+        final pId = p.id;
+        final pLower = pId.toLowerCase();
+        if (pLower == myId || isBotMxid(pLower)) continue;
+        remoteMxid = pId;
+        break;
+      }
+    }
+
+    // 2. Extract best phone number digits
+    final phoneDigits = _extractBestPhoneDigits(room, remoteMxid: remoteMxid);
+
+    // Priority 1: Check device contacts
     if (state.isNotEmpty) {
-      String? deviceName = _matchNumberInState(sId);
-      if (deviceName == null && room.summary.mHeroes?.isNotEmpty == true) {
-        for (final hero in room.summary.mHeroes!) {
-          deviceName = _matchNumberInState(hero);
-          if (deviceName != null) break;
-        }
+      if (phoneDigits.isNotEmpty) {
+        final match = _matchNumberInState(phoneDigits);
+        if (match != null && match.trim().isNotEmpty) return match.trim();
       }
-      if (deviceName == null && room.directChatMatrixID != null) {
-        deviceName = _matchNumberInState(room.directChatMatrixID!);
+      if (remoteMxid != null) {
+        final match = _matchNumberInState(remoteMxid);
+        if (match != null && match.trim().isNotEmpty) return match.trim();
       }
-      deviceName ??= _matchNumberInState(rawRoomName);
-      deviceName ??= _matchNumberInState(room.id);
-      if (deviceName != null && deviceName.trim().isNotEmpty) {
-        return deviceName.trim();
+      final rawName = room.getLocalizedDisplayname();
+      if (!isBotDisplayName(rawName)) {
+        final match = _matchNumberInState(rawName);
+        if (match != null && match.trim().isNotEmpty) return match.trim();
       }
     }
 
-    // Priority 2: Name saved in that social platform (room title if not a raw phone number or generic app name)
-    final digitsInRoom = _extractDigits(rawRoomName);
-    final roomIsPhone = digitsInRoom.length >= 7 &&
-        rawRoomName.replaceAll(RegExp(r'[\d\s\+\-\(\)]'), '').trim().isEmpty;
-    final isGenericAppName = rawRoomName.toLowerCase() == 'allora' ||
-        rawRoomName.toLowerCase() == 'whatsapp' ||
-        rawRoomName.toLowerCase() == 'telegram';
-    if (!isGenericAppName && !roomIsPhone && rawRoomName.trim().isNotEmpty && !rawRoomName.startsWith('@')) {
-      return rawRoomName.trim();
-    }
-
-    // Priority 3: Name they gave themselves on the social platform (profile / push name)
-    if (event != null) {
+    // Priority 2: Check social profile / push name (must NOT be a bridge bot name)
+    // A. Check member display name in room state
+    if (remoteMxid != null && remoteMxid.isNotEmpty) {
       try {
-        final profileName = event.senderFromMemoryOrFallback.calcDisplayname().trim();
-        final digitsInProfile = _extractDigits(profileName);
-        final profileIsPhone = digitsInProfile.length >= 7 &&
-            profileName.replaceAll(RegExp(r'[\d\s\+\-\(\)]'), '').trim().isEmpty;
-        if (!profileIsPhone && profileName.isNotEmpty && !profileName.startsWith('@')) {
-          return _cleanFallback(profileName);
-        }
-      } catch (_) {}
-    }
-
-    if (sId.isNotEmpty) {
-      try {
-        final memberState = room.getState('m.room.member', sId);
-        final mName = memberState?.content['displayname']?.toString().trim();
-        if (mName != null && mName.isNotEmpty) {
-          final digitsInM = _extractDigits(mName);
-          final mIsPhone = digitsInM.length >= 7 &&
-              mName.replaceAll(RegExp(r'[\d\s\+\-\(\)]'), '').trim().isEmpty;
-          if (!mIsPhone && !mName.startsWith('@')) {
-            return _cleanFallback(mName);
+        final memberState = room.getState('m.room.member', remoteMxid);
+        final mName = memberState?.content['displayname']?.toString().trim() ?? '';
+        if (mName.isNotEmpty && !isBotDisplayName(mName) && !isBotMxid(mName)) {
+          final cleaned = _cleanFallback(mName);
+          if (cleaned.isNotEmpty && !isBotDisplayName(cleaned)) {
+            return cleaned;
           }
         }
       } catch (_) {}
     }
 
-    // Priority 4: Fallback (formatted phone number or cleaned handle)
-    if (rawRoomName.isNotEmpty) return rawRoomName;
-    return _cleanFallback(sId);
+    // B. Check event sender display name
+    if (event != null && event.senderId.toLowerCase() != myId && !isBotMxid(event.senderId)) {
+      try {
+        final pName = event.senderFromMemoryOrFallback.calcDisplayname().trim();
+        if (pName.isNotEmpty && !isBotDisplayName(pName) && !isBotMxid(pName)) {
+          final cleaned = _cleanFallback(pName);
+          if (cleaned.isNotEmpty && !isBotDisplayName(cleaned)) {
+            return cleaned;
+          }
+        }
+      } catch (_) {}
+    }
+
+    // C. Check room display name (if human/group name and not a bridge bot)
+    final locRoomName = room.getLocalizedDisplayname().trim();
+    if (locRoomName.isNotEmpty && !isBotDisplayName(locRoomName) && !isBotMxid(locRoomName)) {
+      final cleaned = _cleanFallback(locRoomName);
+      if (cleaned.isNotEmpty && !isBotDisplayName(cleaned)) {
+        return cleaned;
+      }
+    }
+
+    // Priority 3: Phone number format (for WhatsApp / Signal / any platform with digits)
+    if (phoneDigits.length >= 7) {
+      return formatPhoneNumber(phoneDigits, phoneDigits);
+    }
+
+    // Priority 4: Clean username / handle from remote puppet MXID
+    if (remoteMxid != null && remoteMxid.isNotEmpty) {
+      final cleanedHandle = _cleanFallback(remoteMxid);
+      if (cleanedHandle.isNotEmpty && !isBotDisplayName(cleanedHandle) && !isBotMxid(cleanedHandle)) {
+        return cleanedHandle;
+      }
+    }
+
+    // Priority 5: Fallback to platform-friendly name (NEVER "WhatsApp bridge bot")
+    final rLower = room.id.toLowerCase();
+    final rNameLower = locRoomName.toLowerCase();
+    if (rLower.contains('whatsapp') || rNameLower.contains('whatsapp')) {
+      return 'WhatsApp Contact';
+    } else if (rLower.contains('telegram') || rNameLower.contains('telegram')) {
+      return 'Telegram Contact';
+    } else if (rLower.contains('messenger') || rLower.contains('facebook')) {
+      return 'Messenger Contact';
+    } else if (rLower.contains('instagram')) {
+      return 'Instagram Contact';
+    }
+
+    return 'Chat';
+  }
+
+  String _extractBestPhoneDigits(Room room, {String? remoteMxid}) {
+    // 1. Remote puppet MXID: e.g. @whatsapp_919876543210:server.com
+    if (remoteMxid != null && remoteMxid.isNotEmpty) {
+      final local = remoteMxid.split(':').first;
+      final d = _extractDigits(local);
+      if (d.length >= 7) return d;
+    }
+
+    // 2. Direct chat Matrix ID
+    final directId = room.directChatMatrixID;
+    if (directId != null && directId.isNotEmpty && !isBotMxid(directId)) {
+      final d = _extractDigits(directId.split(':').first);
+      if (d.length >= 7) return d;
+    }
+
+    // 3. Remote puppet participants
+    for (final p in room.getParticipants()) {
+      final pId = p.id;
+      if (isBotMxid(pId)) continue;
+      if (isRemotePuppetMxid(pId)) {
+        final d = _extractDigits(pId.split(':').first);
+        if (d.length >= 7) return d;
+      }
+    }
+
+    // 4. Room heroes
+    if (room.summary.mHeroes != null) {
+      for (final h in room.summary.mHeroes!) {
+        if (isBotMxid(h)) continue;
+        final d = _extractDigits(h.split(':').first);
+        if (d.length >= 7) return d;
+      }
+    }
+
+    // 5. Room ID (e.g. !whatsapp_919876543210_...:server.com)
+    final rId = room.id.split(':').first;
+    if (rId.contains('whatsapp') || rId.contains('wa_')) {
+      final d = _extractDigits(rId);
+      if (d.length >= 7) return d;
+    }
+
+    // 6. Canonical Alias
+    final alias = room.canonicalAlias.split(':').first;
+    if (alias.contains('whatsapp') || alias.contains('wa_')) {
+      final d = _extractDigits(alias);
+      if (d.length >= 7) return d;
+    }
+
+    return '';
   }
 
   /// Resolves a contact name given a Matrix ID, phone number string, or room title.
   /// Falls back to [fallback] if no contact matches.
   String resolveName(String idOrTitle, String fallback) {
+    // Priority 1: Device Contact Name
     if (state.isNotEmpty) {
-      // Priority 1: Device Contact Name
       final matchedFromId = _matchNumberInState(idOrTitle);
       if (matchedFromId != null) return matchedFromId;
 
-      final matchedFromFallback = _matchNumberInState(fallback);
-      if (matchedFromFallback != null) return matchedFromFallback;
+      if (!isBotDisplayName(fallback)) {
+        final matchedFromFallback = _matchNumberInState(fallback);
+        if (matchedFromFallback != null) return matchedFromFallback;
+      }
     }
 
-    // Priority 2: Social Saved Name (fallback if not raw phone number)
-    final cleaned = _cleanFallback(fallback);
-    final digits = _extractDigits(cleaned);
-    final isPhone = digits.length >= 7 &&
-        cleaned.replaceAll(RegExp(r'[\d\s\+\-\(\)]'), '').trim().isEmpty;
-    if (!isPhone && cleaned.isNotEmpty) {
-      return cleaned;
+    // Priority 2: Social Saved / Push Name (if not bot and not empty)
+    if (!isBotDisplayName(fallback) && !isBotMxid(fallback)) {
+      final cleaned = _cleanFallback(fallback);
+      if (cleaned.isNotEmpty && !isBotDisplayName(cleaned)) {
+        return cleaned;
+      }
     }
 
-    // Priority 3: Profile name from idOrTitle if not phone number
+    // Priority 3: Phone number from digits in idOrTitle or fallback
+    final idDigits = _extractDigits(idOrTitle.split(':').first);
+    if (idDigits.length >= 7) {
+      return formatPhoneNumber(idDigits, idDigits);
+    }
+    final fbDigits = _extractDigits(fallback);
+    if (fbDigits.length >= 7) {
+      return formatPhoneNumber(fbDigits, fbDigits);
+    }
+
+    // Priority 4: Clean username/handle
     final fromIdCleaned = _cleanFallback(idOrTitle);
-    final idDigits = _extractDigits(fromIdCleaned);
-    final idIsPhone = idDigits.length >= 7 &&
-        fromIdCleaned.replaceAll(RegExp(r'[\d\s\+\-\(\)]'), '').trim().isEmpty;
-    if (!idIsPhone && fromIdCleaned.isNotEmpty) {
+    if (fromIdCleaned.isNotEmpty && !isBotDisplayName(fromIdCleaned) && !isBotMxid(fromIdCleaned)) {
       return fromIdCleaned;
     }
 
-    return cleaned.isNotEmpty ? cleaned : fromIdCleaned;
+    // Priority 5: Fallback without ever showing bot name
+    if (isBotDisplayName(fallback) || isBotMxid(fallback) || isBotMxid(idOrTitle)) {
+      return '';
+    }
+
+    return fallback;
   }
 
   String? _matchNumberInState(String input) {
@@ -312,20 +541,18 @@ class ContactsNotifier extends StateNotifier<Map<String, String>> {
     // 7. Format phone numbers cleanly if it's a number
     final digits = _extractDigits(cleaned);
     if (digits.length >= 7 && (cleaned.startsWith('+') || RegExp(r'^\d+$').hasMatch(cleaned))) {
-      if (digits.startsWith('91') && digits.length == 12) {
-        return '+91 ${digits.substring(2, 7)} ${digits.substring(7)}';
-      } else if (digits.startsWith('1') && digits.length == 11) {
-        return '+1 (${digits.substring(1, 4)}) ${digits.substring(4, 7)}-${digits.substring(7)}';
-      } else if (digits.startsWith('44') && digits.length >= 11 && digits.length <= 12) {
-        return '+44 ${digits.substring(2, 6)} ${digits.substring(6)}';
-      } else if (digits.startsWith('92') && digits.length == 12) {
-        return '+92 ${digits.substring(2, 5)} ${digits.substring(5)}';
-      } else if (digits.length == 10) {
-        return '+${digits.substring(0, 5)} ${digits.substring(5)}';
-      }
-      return '+$digits';
+      return formatPhoneNumber(cleaned, digits);
     }
 
-    return cleaned.isNotEmpty ? cleaned : fallback;
+    // CRITICAL: If cleaned became empty or is still a bot string, never return bot fallback!
+    if (cleaned.isEmpty || isBotDisplayName(cleaned)) {
+      final fallbackDigits = _extractDigits(fallback);
+      if (fallbackDigits.length >= 7) {
+        return formatPhoneNumber(fallbackDigits, fallbackDigits);
+      }
+      return '';
+    }
+
+    return cleaned;
   }
 }

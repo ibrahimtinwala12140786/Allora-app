@@ -263,8 +263,11 @@ class NotificationService {
       room: room,
       event: event,
     );
-    if (senderName.trim().isEmpty) {
+    if (senderName.trim().isEmpty || ContactsNotifier.isBotDisplayName(senderName)) {
       senderName = cleanRoomTitle(room.getLocalizedDisplayname());
+      if (senderName.trim().isEmpty || ContactsNotifier.isBotDisplayName(senderName)) {
+        senderName = netMeta != null ? '${netMeta.displayName} Message' : 'Message';
+      }
     }
 
     // Snippet (kept clear and readable without blur per user request)

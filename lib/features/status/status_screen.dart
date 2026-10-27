@@ -152,27 +152,19 @@ class _StatusScreenState extends ConsumerState<StatusScreen> {
 
     // 2. Resolve with Phone & SIM Contacts
     final resolved = contacts.resolveName(senderId, pushName);
-    if (resolved != pushName && resolved.isNotEmpty) {
+    if (resolved.isNotEmpty && !ContactsNotifier.isBotDisplayName(resolved) && !ContactsNotifier.isBotMxid(resolved)) {
       return resolved;
     }
-    if (pushName.isNotEmpty) {
+    if (pushName.isNotEmpty && !ContactsNotifier.isBotDisplayName(pushName) && !ContactsNotifier.isBotMxid(pushName)) {
       return pushName;
     }
 
     // 3. Clean up phone number / bridge identifier
     final digits = senderId.replaceAll(RegExp(r'[^\d]'), '');
-    if (digits.length >= 10) {
+    if (digits.length >= 7) {
       final fromDigits = contacts.resolveName(digits, '');
-      if (fromDigits.isNotEmpty) return fromDigits;
-
-      if (digits.length == 12 && digits.startsWith('91')) {
-        return '+91 ${digits.substring(2, 7)} ${digits.substring(7)}';
-      } else if (digits.length == 11 && digits.startsWith('1')) {
-        return '+1 (${digits.substring(1, 4)}) ${digits.substring(4, 7)}-${digits.substring(7)}';
-      } else if (digits.length == 10) {
-        return '+${digits.substring(0, 5)} ${digits.substring(5)}';
-      }
-      return '+$digits';
+      if (fromDigits.isNotEmpty && !ContactsNotifier.isBotDisplayName(fromDigits)) return fromDigits;
+      return ContactsNotifier.formatPhoneNumber(digits, digits);
     }
 
     final fallback = senderId.split(':').first.replaceFirst('@', '').replaceFirst(RegExp(r'^(whatsapp_|telegram_|signal_)'), '');

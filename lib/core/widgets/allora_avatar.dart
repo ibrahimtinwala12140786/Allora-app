@@ -4,6 +4,7 @@ import 'package:matrix/matrix.dart';
 
 import '../utils/matrix_media.dart';
 import '../../screens/networks/network_meta.dart';
+import '../../data/services/contacts_service.dart';
 
 /// Deterministic pastel color for a name/id so placeholder avatars stay
 /// stable between rebuilds and app launches.
@@ -210,6 +211,14 @@ class AlloraAvatar extends StatelessWidget {
   static String _initials(String name) {
     final cleaned = name.trim();
     if (cleaned.isEmpty) return '?';
+    // If it's a phone number, extract initials from the last digits or '#'
+    if (cleaned.startsWith('+') || RegExp(r'^\d').hasMatch(cleaned)) {
+      final digits = cleaned.replaceAll(RegExp(r'[^\d]'), '');
+      if (digits.length >= 2) {
+        return digits.substring(digits.length - 2);
+      }
+      return '#';
+    }
     final parts = cleaned.split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
     if (parts.length == 1) return parts.first.characters.first.toUpperCase();
     return (parts.first.characters.first + parts.last.characters.first).toUpperCase();
@@ -235,14 +244,7 @@ class AlloraAvatar extends StatelessWidget {
       bool isBridgedDirect = isDirect;
       if (memberCount == 3) {
         for (final p in room.getParticipants()) {
-          final id = p.id.toLowerCase();
-          final localpart = id.startsWith('@') ? id.substring(1).split(':').first : id;
-          if (localpart.endsWith('bot') ||
-              localpart.contains('bridge') ||
-              localpart.startsWith('whatsappbot') ||
-              localpart.startsWith('telegrambot') ||
-              localpart.startsWith('instagrambot') ||
-              localpart.startsWith('messengerbot')) {
+          if (ContactsNotifier.isBotMxid(p.id)) {
             isBridgedDirect = true;
             break;
           }
@@ -255,7 +257,7 @@ class AlloraAvatar extends StatelessWidget {
 
       final myId = room.client.userID;
       final partnerId = room.directChatMatrixID;
-      if (partnerId != null && partnerId != myId) {
+      if (partnerId != null && partnerId != myId && !ContactsNotifier.isBotMxid(partnerId)) {
         final partnerAvatar =
             room.getState('m.room.member', partnerId)?.content['avatar_url'];
         if (partnerAvatar is String && partnerAvatar.startsWith('mxc://')) {
@@ -268,9 +270,7 @@ class AlloraAvatar extends StatelessWidget {
         for (final state in memberStates) {
           final stateKey = state.stateKey;
           if (stateKey == myId || stateKey == null) continue;
-          if (stateKey.startsWith('@whatsappbot') ||
-              stateKey.startsWith('@telegrambot') ||
-              stateKey.startsWith('@bridge')) continue;
+          if (ContactsNotifier.isBotMxid(stateKey)) continue;
           final memberAvatar = state.content['avatar_url'];
           if (memberAvatar is String && memberAvatar.startsWith('mxc://')) {
             final parsed = Uri.tryParse(memberAvatar);
@@ -280,21 +280,7 @@ class AlloraAvatar extends StatelessWidget {
       }
       for (final user in room.getParticipants()) {
         if (user.id == myId) continue;
-        if (user.id.startsWith('@whatsappbot') ||
-            user.id.startsWith('@telegrambot') ||
-            user.id.startsWith('@bridge')) continue;
-        if (user.avatarUrl != null) {
-          return user.avatarUrl;
-        }
-        final memberAvatar =
-            room.getState('m.room.member', user.id)?.content['avatar_url'];
-        if (memberAvatar is String && memberAvatar.startsWith('mxc://')) {
-          final parsed = Uri.tryParse(memberAvatar);
-          if (parsed != null) return parsed;
-        }
-      }
-      for (final user in room.getParticipants()) {
-        if (user.id == myId) continue;
+        if (ContactsNotifier.isBotMxid(user.id)) continue;
         if (user.avatarUrl != null) {
           return user.avatarUrl;
         }

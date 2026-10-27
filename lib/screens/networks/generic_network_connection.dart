@@ -110,7 +110,7 @@ class _GenericNetworkConnectSheetState
       }
       if (room == null) {
         setState(() {
-          _error = 'Could not reach ${widget.meta.displayName} bridge bot.';
+          _error = 'Could not reach ${widget.meta.displayName} service.';
           _isLoading = false;
         });
         return;
@@ -119,7 +119,7 @@ class _GenericNetworkConnectSheetState
       final command = input.isEmpty ? 'login' : 'login $input';
       await room.sendTextEvent(command);
 
-      // Give bridge bot a moment to process or confirm
+      // Give bridge service a moment to process or confirm
       await Future.delayed(const Duration(seconds: 2));
 
       if (mounted) {
@@ -141,7 +141,7 @@ class _GenericNetworkConnectSheetState
     } catch (e) {
       if (mounted) {
         setState(() {
-          _error = 'Failed to communicate with bridge bot: $e';
+          _error = 'Failed to connect to ${widget.meta.displayName}: $e';
           _isLoading = false;
         });
       }

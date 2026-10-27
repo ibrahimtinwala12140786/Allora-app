@@ -863,16 +863,16 @@ class _FacebookMessengerConnectSheetState
         _addLog('📤 Sending payload to bridge bot...');
         await room.sendTextEvent(payload);
       } else {
-        _addLog('❌ Could not reach bridge bot room.');
+        _addLog('❌ Could not reach bridge service.');
         setState(() {
-          _sheetError = 'Could not reach bridge bot. Please retry.';
+          _sheetError = 'Could not reach Facebook service. Please retry.';
           _currentStep = FacebookConnectStep.chooseMethod;
         });
       }
     } catch (e) {
       _addLog('❌ Error transmitting to bridge: $e');
       setState(() {
-        _sheetError = 'Error sending credentials to bridge: $e';
+        _sheetError = 'Error sending credentials to Facebook service: $e';
         _currentStep = FacebookConnectStep.chooseMethod;
       });
     }
@@ -887,7 +887,7 @@ class _FacebookMessengerConnectSheetState
     final room = await _resolveBotRoom();
     if (room == null) {
       setState(() {
-        _sheetError = "Could not reach Facebook Bridge bot. Ensure bridge service is running.";
+        _sheetError = "Could not reach Facebook service. Ensure connection is active.";
       });
       return;
     }

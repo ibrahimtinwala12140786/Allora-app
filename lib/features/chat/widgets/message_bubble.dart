@@ -20,7 +20,6 @@ import '../../../data/services/contacts_service.dart';
 import '../../../data/settings/app_settings.dart';
 import '../../../data/services/ai_service.dart';
 import '../../../screens/bridge/bridge_room_classifier.dart';
-import '../../chat_list/chat_list_providers.dart' show cleanRoomTitle;
 import 'image_viewer.dart';
 import 'video_player_screen.dart';
 import '../../../core/services/link_preview_service.dart';
@@ -136,7 +135,7 @@ class _MessageBubbleState extends ConsumerState<MessageBubble> {
           title: isMe
               ? 'You'
               : (BridgeRoomClassifier.isDirectChat(room, client: room.client)
-                  ? cleanRoomTitle(room.displayname)
+                  ? ref.read(contactsProvider.notifier).resolveContactHierarchy(room: room)
                   : ref.read(contactsProvider.notifier).resolveName(event.senderId, event.senderFromMemoryOrFallback.calcDisplayname())),
           isAudio: shouldPlayAudio,
         ));
@@ -893,7 +892,7 @@ class _MessageBubbleState extends ConsumerState<MessageBubble> {
                     title: isMe
                         ? 'You'
                         : (BridgeRoomClassifier.isDirectChat(room, client: room.client)
-                            ? cleanRoomTitle(room.displayname)
+                            ? ref.read(contactsProvider.notifier).resolveContactHierarchy(room: room)
                             : ref.read(contactsProvider.notifier).resolveName(event.senderId, event.senderFromMemoryOrFallback.calcDisplayname())),
                   ));
                 },
@@ -1612,8 +1611,7 @@ class _ReplyPreview extends ConsumerWidget {
       if (isOriginalMine) {
         name = 'You';
       } else if (BridgeRoomClassifier.isDirectChat(room, client: room.client)) {
-        final rawTitle = cleanRoomTitle(room.displayname);
-        name = ref.read(contactsProvider.notifier).resolveName(original.senderId, rawTitle);
+        name = ref.read(contactsProvider.notifier).resolveContactHierarchy(room: room, senderId: original.senderId);
       } else {
         final fallback = original.senderFromMemoryOrFallback.calcDisplayname();
         name = ref.read(contactsProvider.notifier).resolveName(original.senderId, fallback);

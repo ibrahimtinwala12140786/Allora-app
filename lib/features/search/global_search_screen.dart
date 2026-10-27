@@ -70,12 +70,25 @@ class _GlobalSearchScreenState extends ConsumerState<GlobalSearchScreen> {
     final client = ref.read(matrixClientProvider);
     final hidden = ref.read(settingsProvider).hiddenChats;
     final rooms = client.rooms
-        .where((r) =>
-            r.membership == Membership.join &&
-            !r.isSpace &&
-            !hidden.contains(r.id) &&
-            !BridgeRoomClassifier.isManagementRoom(r, client: client) &&
-            !BridgeRoomClassifier.isEmptyOrGhostRoom(r, client: client))
+        .where((r) {
+          if (r.membership != Membership.join || r.isSpace || hidden.contains(r.id)) {
+            return false;
+          }
+          if (BridgeRoomClassifier.isManagementRoom(r, client: client) ||
+              BridgeRoomClassifier.isEmptyOrGhostRoom(r, client: client)) {
+            return false;
+          }
+          final loc = r.getLocalizedDisplayname().toLowerCase().trim();
+          final rName = r.displayname.toLowerCase().trim();
+          if (loc.contains('bridge bot') ||
+              loc.contains('bridgebot') ||
+              rName.contains('bridge bot') ||
+              rName.contains('bridgebot')) {
+            final hasPuppet = r.getParticipants().any((p) => ContactsNotifier.isRemotePuppetMxid(p.id));
+            if (!hasPuppet) return false;
+          }
+          return true;
+        })
         .toList()
       ..sort((a, b) {
         final at = a.lastEvent?.originServerTs ??
@@ -91,12 +104,15 @@ class _GlobalSearchScreenState extends ConsumerState<GlobalSearchScreen> {
     final q = _query.trim().toLowerCase();
     final rooms = _candidateRooms();
     final contacts = ref.read(contactsProvider);
+    final contactsNotifier = ref.read(contactsProvider.notifier);
     setState(() {
       _chatHits = q.isEmpty
           ? rooms.take(12).toList()
           : rooms
-              .where((r) =>
-                  cleanRoomTitle(r.displayname).toLowerCase().contains(q))
+              .where((r) {
+                final title = contactsNotifier.resolveContactHierarchy(room: r).toLowerCase();
+                return title.contains(q);
+              })
               .take(30)
               .toList();
       _contactHits = q.isEmpty
@@ -403,7 +419,7 @@ class _GlobalSearchScreenState extends ConsumerState<GlobalSearchScreen> {
                   builder: (context) {
                     final networkId = BridgeRoomClassifier.getNetworkForRoom(room,
                         client: room.client);
-                    final title = cleanRoomTitle(room.displayname);
+                    final title = ref.read(contactsProvider.notifier).resolveContactHierarchy(room: room);
                     final isDirect = BridgeRoomClassifier.isDirectChat(room, client: room.client);
                     return ListTile(
                       leading: AlloraAvatar(
@@ -517,7 +533,7 @@ class _GlobalSearchScreenState extends ConsumerState<GlobalSearchScreen> {
 
   Widget _messageTile(_MessageHit hit, {bool isLink = false}) {
     final c = context.allora;
-    final title = cleanRoomTitle(hit.room.displayname);
+    final title = ref.read(contactsProvider.notifier).resolveContactHierarchy(room: hit.room);
     return ListTile(
       leading: AlloraAvatar(
         name: title,

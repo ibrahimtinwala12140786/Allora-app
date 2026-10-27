@@ -14,7 +14,6 @@ import '../../data/settings/app_settings.dart';
 import '../../data/settings/labels.dart';
 import '../../screens/bridge/bridge_room_classifier.dart';
 import '../../screens/networks/network_meta.dart';
-import '../chat_list/chat_list_providers.dart';
 import 'widgets/disappearing_sheet.dart';
 import 'widgets/image_viewer.dart';
 import 'chat_screen.dart';
@@ -91,7 +90,7 @@ class _ChatDetailsScreenState extends ConsumerState<ChatDetailsScreen> {
   Widget build(BuildContext context) {
     final c = context.allora;
     final settings = ref.watch(settingsProvider);
-    final title = cleanRoomTitle(room.displayname);
+    final title = ref.read(contactsProvider.notifier).resolveContactHierarchy(room: room);
     final networkId = BridgeRoomClassifier.getNetworkForRoom(room,
         client: room.client);
     final network = networkId != null ? metaFor(networkId) : null;

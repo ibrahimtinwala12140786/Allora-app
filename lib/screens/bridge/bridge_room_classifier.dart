@@ -275,27 +275,30 @@ class BridgeRoomClassifier {
   }
 
   static bool _isStandaloneBotRoomName(String name) {
-    return name == 'whatsapp bridge bot' ||
-        name == 'whatsapp bridge' ||
-        name == 'telegram bridge bot' ||
-        name == 'telegram bridge' ||
-        name == 'facebook messenger bridge' ||
-        name == 'messenger bridge bot' ||
-        name == 'messenger bridge' ||
-        name == 'facebook bridge bot' ||
-        name == 'facebook bridge' ||
-        name == 'instagram bridge bot' ||
-        name == 'instagram bridge' ||
-        name == 'discord bridge bot' ||
-        name == 'discord bridge' ||
-        name == 'slack bridge bot' ||
-        name == 'slack bridge' ||
-        name == 'signal bridge bot' ||
-        name == 'signal bridge' ||
-        name == 'twitter bridge bot' ||
-        name == 'x bridge' ||
-        name == 'bridge bot' ||
-        name == 'bridgebot';
+    final lower = name.toLowerCase().trim();
+    return lower == 'whatsapp bridge bot' ||
+        lower == 'whatsapp bridge' ||
+        lower == 'telegram bridge bot' ||
+        lower == 'telegram bridge' ||
+        lower == 'facebook messenger bridge' ||
+        lower == 'messenger bridge bot' ||
+        lower == 'messenger bridge' ||
+        lower == 'facebook bridge bot' ||
+        lower == 'facebook bridge' ||
+        lower == 'instagram bridge bot' ||
+        lower == 'instagram bridge' ||
+        lower == 'discord bridge bot' ||
+        lower == 'discord bridge' ||
+        lower == 'slack bridge bot' ||
+        lower == 'slack bridge' ||
+        lower == 'signal bridge bot' ||
+        lower == 'signal bridge' ||
+        lower == 'twitter bridge bot' ||
+        lower == 'x bridge' ||
+        lower == 'bridge bot' ||
+        lower == 'bridgebot' ||
+        lower.contains('bridge bot') ||
+        lower.contains('bridgebot');
   }
 
   static bool isManagementCommandOrGreeting(String body) {
@@ -340,9 +343,20 @@ class BridgeRoomClassifier {
     final participants = room.getParticipants();
     final memberCount = room.summary.mJoinedMemberCount ?? participants.length;
 
-    // 1. Group chats are NEVER management rooms!
+    // Fast check: canonical and localized display names for standalone bot room
+    final name = room.displayname.toLowerCase().trim();
+    final locName = room.getLocalizedDisplayname().toLowerCase().trim();
+    if (_isStandaloneBotRoomName(name) || _isStandaloneBotRoomName(locName)) {
+      final hasPuppet = participants.any((p) => _isRemotePuppetMxid(p.id.toLowerCase()));
+      if (!hasPuppet) {
+        return true;
+      }
+    }
+
+    // 1. Group chats with human puppets are NEVER management rooms!
     if (memberCount > 2) {
-      return false;
+      final hasPuppet = participants.any((p) => _isRemotePuppetMxid(p.id.toLowerCase()));
+      if (hasPuppet) return false;
     }
 
     // 2. Check if any participant is a remote puppet / contact
@@ -401,8 +415,7 @@ class BridgeRoomClassifier {
     }
 
     // 6. Check canonical display name for pure standalone bot room
-    final name = room.displayname.toLowerCase().trim();
-    if (_isStandaloneBotRoomName(name)) {
+    if (_isStandaloneBotRoomName(name) || _isStandaloneBotRoomName(locName)) {
       return true;
     }
 

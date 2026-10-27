@@ -179,10 +179,19 @@ String cleanRoomTitle(String raw) {
       (cleaned.startsWith('+') || RegExp(r'^\d+$').hasMatch(cleaned.replaceAll(RegExp(r'[\s\-\(\)]'), '')));
 
   if (isPhone && digitsOnly.length >= 7) {
-    cleaned = formatPhoneNumber(cleaned, digitsOnly);
+    return ContactsNotifier.formatPhoneNumber(cleaned, digitsOnly);
   }
 
-  return cleaned.isNotEmpty ? cleaned : raw;
+  // CRITICAL FIX: If cleaned became empty or is still a bridge bot string, never return bot fallback!
+  if (cleaned.isEmpty || ContactsNotifier.isBotDisplayName(cleaned)) {
+    final rawDigits = raw.replaceAll(RegExp(r'[^\d]'), '');
+    if (rawDigits.length >= 7) {
+      return ContactsNotifier.formatPhoneNumber(rawDigits, rawDigits);
+    }
+    return '';
+  }
+
+  return cleaned;
 }
 
 final smartFoldersProcessorProvider = Provider<void>((ref) {
@@ -245,6 +254,19 @@ final chatListProvider = Provider<ChatListData>((ref) {
     // Always hide bot management rooms and status broadcast from inbox
     if (isBridgeOrBot) continue;
     if (isStatusBroadcast) continue;
+
+    final locName = room.getLocalizedDisplayname().toLowerCase().trim();
+    final rName = room.displayname.toLowerCase().trim();
+    if (locName.contains('bridge bot') ||
+        locName.contains('bridgebot') ||
+        rName.contains('bridge bot') ||
+        rName.contains('bridgebot')) {
+      final hasPuppet = room.getParticipants().any((p) => ContactsNotifier.isRemotePuppetMxid(p.id));
+      if (!hasPuppet) {
+        continue;
+      }
+    }
+
     if (hidden.contains(room.id)) continue;
     if (settings.hiddenChats.contains(room.id)) continue;
     if (BridgeRoomClassifier.isEmptyOrGhostRoom(room, client: client)) continue;

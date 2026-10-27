@@ -16,7 +16,6 @@ import '../../../data/services/scheduled_message_service.dart';
 import '../../../data/settings/app_settings.dart';
 import '../../../screens/bridge/bridge_room_classifier.dart';
 import '../../ai/ai_assistant_sheet.dart';
-import '../../chat_list/chat_list_providers.dart' show cleanRoomTitle;
 import '../../../core/utils/media_limits.dart';
 import 'emoji_picker_sheet.dart';
 import 'voice_recorder_dialog.dart';
@@ -798,8 +797,10 @@ class ChatInputBarState extends ConsumerState<ChatInputBar> {
       return 'Replying to yourself';
     }
     if (BridgeRoomClassifier.isDirectChat(widget.room, client: widget.room.client)) {
-      final rawTitle = cleanRoomTitle(widget.room.displayname);
-      final name = ref.read(contactsProvider.notifier).resolveName(replyTo.senderId, rawTitle);
+      final name = ref.read(contactsProvider.notifier).resolveContactHierarchy(
+        room: widget.room,
+        senderId: replyTo.senderId,
+      );
       return 'Replying to $name';
     }
     final fallback = replyTo.senderFromMemoryOrFallback.calcDisplayname();

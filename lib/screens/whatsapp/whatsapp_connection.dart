@@ -320,8 +320,8 @@ class _WhatsAppConnectSheetState extends State<WhatsAppConnectSheet> {
             _generatedPairingCode == null &&
             !_isConnected) {
           setState(() {
-            _debugLogs.add('Error: 45s passed with NO reply from the bot.');
-            _sheetError = "The bridge bot did not reply. The server bridge might be offline, or your app is still syncing old messages in the background.";
+            _debugLogs.add('Error: 45s passed with NO reply from the bridge service.');
+            _sheetError = "WhatsApp service did not reply. The server bridge might be offline, or your app is still syncing old messages in the background.";
             _sheetLoading = false;
           });
         }
